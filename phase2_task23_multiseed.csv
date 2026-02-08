@@ -1,0 +1,6 @@
+seed,feasible_by_astar_check,astar_success,astar_time_ms,astar_path_length_m,astar_nodes_expanded,rrt_success,rrt_time_ms,rrt_path_length_m,rrt_vertices_sampled,rrt_strategy
+2557,True,True,29.517375,25.084776,7020,True,26.180958,29.646365,159,default
+2558,True,True,12.577500,23.954625,2934,True,4.100375,24.113776,58,default
+2559,True,True,17.868333,23.216147,4321,True,5.297458,25.488727,59,default
+2560,True,True,14.445291,24.047518,3505,True,3.342542,24.493365,54,default
+2561,True,True,4.053375,21.830361,899,True,2.996000,23.008857,50,default

@@ -30,4 +30,9 @@ a start to a goal while avoiding static and dynamic obstacles.
 - Coordination: The dynamic obstacle is only visible after 
   calling 'env.activate_dynamic_obstacle()'.
 
+5. TASK 2.3 MULTI-SEED TABLE
+- Run `python main.py --headless --no-hold` to automatically generate a
+  5-seed A* vs RRT-Connect comparison table.
+- Results are also saved to `phase2_task23_multiseed.csv`.
+
 ===========================================================

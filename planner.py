@@ -5,6 +5,7 @@ import random
 import heapq
 import sys
 import select
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.draw import polygon
@@ -407,6 +408,21 @@ def astar_search(mapper, start_xy, goal_xy, weight=1.0):
     }
 
 
+def feasibility_check(mapper, start_xy, goal_xy):
+    """
+    Edge-case handling: verify if the random layout is solvable.
+    Uses A* as a deterministic reachability check.
+    """
+    res = astar_search(mapper, start_xy, goal_xy, weight=1.0)
+    return {
+        "feasible": bool(res["success"]),
+        "time_ms": float(res["time_ms"]),
+        "nodes_expanded": int(res.get("nodes_expanded", 0)),
+        "reason": res.get("reason", "" if res["success"] else "unknown"),
+        "path_length": float(res["path_length"]) if res["success"] else math.inf,
+    }
+
+
 class RRTTree:
     def __init__(self, root):
         self.points = [np.array(root, dtype=float)]
@@ -583,6 +599,53 @@ def rrt_connect_planner(
     }
 
 
+def rrt_connect_with_narrow_passage_fallback(
+    mapper,
+    start_xy,
+    goal_xy,
+    bounds,
+    step_size=0.5,
+    max_iterations=10000,
+    goal_bias=0.1,
+    rng_seed=0,
+):
+    """
+    Edge-case handling: for narrow passages, retry RRT-Connect with tighter step-size
+    and more iterations when the default run fails.
+    """
+    primary = rrt_connect_planner(
+        mapper=mapper,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        bounds=bounds,
+        step_size=step_size,
+        max_iterations=max_iterations,
+        goal_bias=goal_bias,
+        rng_seed=rng_seed,
+    )
+    if primary["success"]:
+        primary["strategy"] = "default"
+        return primary
+
+    fallback = rrt_connect_planner(
+        mapper=mapper,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        bounds=bounds,
+        step_size=max(0.2, step_size * 0.6),
+        max_iterations=int(max_iterations * 2.2),
+        goal_bias=min(0.25, goal_bias * 1.5),
+        rng_seed=rng_seed + 7919,
+    )
+    if fallback["success"]:
+        fallback["strategy"] = "narrow_passage_fallback"
+        fallback["fallback_trigger"] = primary.get("reason", "primary_failed")
+        return fallback
+
+    primary["strategy"] = "default_and_fallback_failed"
+    return primary
+
+
 def print_phase2_comparison_table(results):
     headers = [
         "Algorithm",
@@ -620,6 +683,161 @@ def print_phase2_comparison_table(results):
     print(fmt_row(["-" * (w - 2) for w in col_widths]))
     for r in rows:
         print(fmt_row(r))
+
+
+def run_phase2_algorithms_for_seed(
+    seed,
+    resolution=0.1,
+    rrt_step_size=0.5,
+    rrt_max_iterations=15000,
+    rrt_goal_bias=0.1,
+):
+    """Run A* and RRT-Connect once for one random seed in DIRECT mode."""
+    env = env_factory.RandomizedWarehouse(seed=seed, mode=env_factory.p.DIRECT)
+    setup = env.get_problem_setup()
+
+    mapper = GridMapper(setup, resolution=resolution)
+    mapper.fill_obstacles(setup["static_obstacles"])
+    mapper.compute_cspace(setup["static_obstacles"], setup["robot_type"], setup["robot_geometry"])
+
+    a_star_result = astar_search(mapper, setup["start"], setup["goal"], weight=1.0)
+    feasible = bool(a_star_result["success"])
+    if feasible:
+        rrt_result = rrt_connect_with_narrow_passage_fallback(
+            mapper=mapper,
+            start_xy=setup["start"],
+            goal_xy=setup["goal"],
+            bounds=setup["map_bounds"],
+            step_size=rrt_step_size,
+            max_iterations=rrt_max_iterations,
+            goal_bias=rrt_goal_bias,
+            rng_seed=seed,
+        )
+    else:
+        rrt_result = {
+            "path": None,
+            "time_ms": 0.0,
+            "path_length": math.inf,
+            "vertices_sampled": 0,
+            "success": False,
+            "reason": "map_infeasible_by_astar_check",
+            "strategy": "skipped_due_to_infeasible_map",
+        }
+
+    return {
+        "seed": int(seed),
+        "feasible": feasible,
+        "A*": a_star_result,
+        "RRT-Connect": rrt_result,
+    }
+
+
+def print_task23_multiseed_table(multiseed_results):
+    """Print Task 2.3 comparison table across multiple seeds."""
+    headers = [
+        "Seed",
+        "Feasible",
+        "A* Time (ms)",
+        "A* Length (m)",
+        "A* Memory",
+        "RRT Time (ms)",
+        "RRT Length (m)",
+        "RRT Memory",
+        "RRT Strategy",
+    ]
+    rows = []
+    for item in multiseed_results:
+        a_res = item["A*"]
+        r_res = item["RRT-Connect"]
+        rows.append(
+            [
+                str(item["seed"]),
+                ("Y" if item.get("feasible", False) else "N"),
+                f"{a_res['time_ms']:.2f}",
+                f"{a_res['path_length']:.2f}" if a_res["success"] else "N/A",
+                str(a_res.get("nodes_expanded", 0)),
+                f"{r_res['time_ms']:.2f}",
+                f"{r_res['path_length']:.2f}" if r_res["success"] else "N/A",
+                str(r_res.get("vertices_sampled", 0)),
+                str(r_res.get("strategy", "default")),
+            ]
+        )
+
+    # Mean row (success-aware for path length).
+    if rows:
+        a_times = [item["A*"]["time_ms"] for item in multiseed_results]
+        a_lens = [item["A*"]["path_length"] for item in multiseed_results if item["A*"]["success"]]
+        a_mems = [item["A*"].get("nodes_expanded", 0) for item in multiseed_results]
+        r_times = [item["RRT-Connect"]["time_ms"] for item in multiseed_results]
+        r_lens = [item["RRT-Connect"]["path_length"] for item in multiseed_results if item["RRT-Connect"]["success"]]
+        r_mems = [item["RRT-Connect"].get("vertices_sampled", 0) for item in multiseed_results]
+        rows.append(
+            [
+                "MEAN",
+                "-",
+                f"{float(np.mean(a_times)):.2f}",
+                f"{float(np.mean(a_lens)):.2f}" if a_lens else "N/A",
+                f"{float(np.mean(a_mems)):.1f}",
+                f"{float(np.mean(r_times)):.2f}",
+                f"{float(np.mean(r_lens)):.2f}" if r_lens else "N/A",
+                f"{float(np.mean(r_mems)):.1f}",
+                "-",
+            ]
+        )
+
+    col_widths = []
+    for col_idx in range(len(headers)):
+        values = [headers[col_idx]] + [r[col_idx] for r in rows]
+        col_widths.append(max(len(v) for v in values) + 2)
+
+    def fmt_row(vals):
+        return "".join(v.ljust(col_widths[i]) for i, v in enumerate(vals))
+
+    print("\n=== Task 2.3 Multi-Seed Comparison (A* vs RRT-Connect) ===")
+    print(fmt_row(headers))
+    print(fmt_row(["-" * (w - 2) for w in col_widths]))
+    for r in rows:
+        print(fmt_row(r))
+
+
+def save_task23_multiseed_csv(multiseed_results, csv_path="phase2_task23_multiseed.csv"):
+    """Save Task 2.3 multi-seed comparison to CSV for report usage."""
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "seed",
+                "feasible_by_astar_check",
+                "astar_success",
+                "astar_time_ms",
+                "astar_path_length_m",
+                "astar_nodes_expanded",
+                "rrt_success",
+                "rrt_time_ms",
+                "rrt_path_length_m",
+                "rrt_vertices_sampled",
+                "rrt_strategy",
+            ]
+        )
+        for item in multiseed_results:
+            a_res = item["A*"]
+            r_res = item["RRT-Connect"]
+            writer.writerow(
+                [
+                    item["seed"],
+                    item.get("feasible", False),
+                    a_res["success"],
+                    f"{a_res['time_ms']:.6f}",
+                    (f"{a_res['path_length']:.6f}" if a_res["success"] else ""),
+                    a_res.get("nodes_expanded", 0),
+                    r_res["success"],
+                    f"{r_res['time_ms']:.6f}",
+                    (f"{r_res['path_length']:.6f}" if r_res["success"] else ""),
+                    r_res.get("vertices_sampled", 0),
+                    r_res.get("strategy", "default"),
+                ]
+            )
+    print(f"Task 2.3 CSV saved to {csv_path}")
 
 
 def plot_phase2_paths(setup, mapper, path_results, student_id):
@@ -1799,4 +2017,3 @@ def run_dstar_lite_dynamic_simulation(
         "executed_trail": executed_trail,
         "replan_events": replan_events,
     }
-

@@ -7,6 +7,14 @@ import env_factory
 import planner
 
 
+def run_task23_multiseed(student_id=2557, seed_count=5):
+    """Run Task 2.3 A* vs RRT-Connect benchmark across multiple seeds."""
+    seeds = [int(student_id + i) for i in range(max(1, seed_count))]
+    multiseed_results = [planner.run_phase2_algorithms_for_seed(seed) for seed in seeds]
+    planner.print_task23_multiseed_table(multiseed_results)
+    planner.save_task23_multiseed_csv(multiseed_results, csv_path="phase2_task23_multiseed.csv")
+
+
 def run_navigation(student_id=2557, gui=True, keep_alive=True):
     """Run the full coursework pipeline from map setup to dynamic replanning."""
     mode = env_factory.p.GUI if gui else env_factory.p.DIRECT
@@ -47,6 +55,11 @@ def run_navigation(student_id=2557, gui=True, keep_alive=True):
     print("This coursework uses planar translation only, so C-space here is 2D: q=(x, y).")
     print(f"Start ({sx:.1f}, {sy:.1f}) collision-free: {mapper.is_collision_free(sx, sy)}")
     print(f"Goal  ({gx:.1f}, {gy:.1f}) collision-free: {mapper.is_collision_free(gx, gy)}")
+    feasibility = planner.feasibility_check(mapper, setup["start"], setup["goal"])
+    print(
+        f"Feasibility check (A*): feasible={feasibility['feasible']} | "
+        f"time={feasibility['time_ms']:.2f} ms | expanded={feasibility['nodes_expanded']}"
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
     ax1 = axes[0]
@@ -75,11 +88,15 @@ def run_navigation(student_id=2557, gui=True, keep_alive=True):
         plt.close()
     print("Phase 1 plot saved to phase1_workspace_vs_cspace.png")
 
+    if not feasibility["feasible"]:
+        print("Map judged infeasible by A* feasibility check. Skipping Phase 2/3 execution for this seed.")
+        return
+
     # Phase 2: Static planning comparison.
     a_star_result = planner.astar_search(mapper, setup["start"], setup["goal"], weight=1.0)
     wa_star_15_result = planner.astar_search(mapper, setup["start"], setup["goal"], weight=1.5)
     wa_star_50_result = planner.astar_search(mapper, setup["start"], setup["goal"], weight=5.0)
-    rrt_result = planner.rrt_connect_planner(
+    rrt_result = planner.rrt_connect_with_narrow_passage_fallback(
         mapper=mapper,
         start_xy=setup["start"],
         goal_xy=setup["goal"],
@@ -181,7 +198,16 @@ def main():
     parser.add_argument("--student-id", type=int, default=2557, help="Last 4 digits of student ID")
     parser.add_argument("--headless", action="store_true", help="Run in DIRECT mode without GUI")
     parser.add_argument("--no-hold", action="store_true", help="Exit after planning instead of keeping GUI open")
+    parser.add_argument(
+        "--task23-seed-count",
+        type=int,
+        default=5,
+        help="Number of random seeds for Task 2.3 A* vs RRT-Connect comparison",
+    )
     args = parser.parse_args()
+
+    # Task 2.3 requirement: compare A* and RRT-Connect across 5 seeds.
+    run_task23_multiseed(student_id=args.student_id, seed_count=args.task23_seed_count)
 
     run_navigation(student_id=args.student_id, gui=not args.headless, keep_alive=not args.no_hold)
 
